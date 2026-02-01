@@ -1,0 +1,792 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// CORE MULTI-TENANT ENTITIES
+// ============================================
+
+model User {
+  id                String    @id @default(cuid())
+  myDigitalId       String?   @unique
+  email             String    @unique
+  phone             String?
+  fullName          String?
+  icNumber          String?   // Malaysian IC for locals
+  passportNumber    String?   // For tourists
+  nationality       String    @default("MY")
+  
+  // Verification
+  isEmailVerified   Boolean   @default(false)
+  isPhoneVerified   Boolean   @default(false)
+  isMyIdVerified    Boolean   @default(false)
+  verificationLevel Int       @default(0) // 0-3 levels
+  
+  // Profile
+  avatarUrl         String?
+  preferences       Json?     // Language, currency, notifications
+  
+  // Relations
+  bookings          Booking[]
+  reviews           Review[]
+  favorites         Favorite[]
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([myDigitalId])
+  @@index([email])
+  @@map("users")
+}
+
+model Merchant {
+  id                String    @id @default(cuid())
+  
+  // Business Info
+  businessName      String
+  registrationNumber String   @unique // SSM/ROC number
+  businessType      BusinessType
+  
+  // MyDigitalID
+  myDigitalId       String?   @unique
+  
+  // Location (State tagging for multi-tenancy)
+  state             State     // Primary state of operation
+  district          String
+  address           String
+  postcode          String
+  latitude          Float?
+  longitude         Float?
+  
+  // Contact
+  email             String
+  phone             String
+  website           String?
+  
+  // Banking
+  bankName          String?
+  bankAccountNumber String?
+  bankAccountName   String?
+  
+  // Verification & Status
+  verificationStatus VerificationStatus @default(PENDING)
+  isActive          Boolean   @default(true)
+  
+  // Onboarding
+  onboardedBy       String?   // Field officer ID
+  onboardedAt       DateTime?
+  
+  // Commission settings
+  commissionRate    Float     @default(0.10) // 10% default
+  
+  // Relations
+  inventory         Inventory[]
+  bookings          Booking[]
+  employees         Employee[]
+  accountingEntries AccountingEntry[]
+  documents         LegalDocument[]
+  offlineBookings   OfflineBooking[]
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([state])
+  @@index([verificationStatus])
+  @@index([registrationNumber])
+  @@map("merchants")
+}
+
+// ============================================
+// INVENTORY SYSTEM
+// ============================================
+
+model Inventory {
+  id                String          @id @default(cuid())
+  merchantId        String
+  merchant          Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  // Categorization
+  category          InventoryCategory
+  type              InventoryType
+  
+  // State tagging for multi-tenancy
+  state             State
+  district          String
+  
+  // Basic Info
+  name              String
+  description       String          @db.Text
+  shortDescription  String?
+  
+  // Location
+  address           String?
+  latitude          Float?
+  longitude         Float?
+  
+  // Media
+  images            String[]        // Array of image URLs
+  coverImage        String?
+  
+  // Pricing
+  basePrice         Float           // Per night for rooms, per day for cars
+  currency          String          @default("MYR")
+  
+  // Availability Rules (JSON for flexibility)
+  availabilityRules Json?           // { advanceBookingDays, minStay, maxStay, blockedDates }
+  pricingRules      Json?           // { seasonalPricing, weekendRates, discounts }
+  
+  // Type-specific metadata
+  metadata          Json?           // Flexible storage for different inventory types
+  
+  // For vehicles (GPS)
+  gpsDeviceId       String?         @unique
+  gpsDevice         GpsDevice?      @relation(fields: [gpsDeviceId], references: [id])
+  
+  // Status
+  isActive          Boolean         @default(true)
+  isVerified        Boolean         @default(false)
+  
+  // Relations
+  bookings          Booking[]
+  availabilitySlots AvailabilitySlot[]
+  reviews           Review[]
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([merchantId])
+  @@index([state])
+  @@index([category])
+  @@index([type])
+  @@index([isActive])
+  @@map("inventory")
+}
+
+model AvailabilitySlot {
+  id            String    @id @default(cuid())
+  inventoryId   String
+  inventory     Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  
+  date          DateTime  @db.Date
+  isAvailable   Boolean   @default(true)
+  priceOverride Float?    // Special pricing for this date
+  
+  // For rooms: number of rooms available
+  // For cars: 1 if available, 0 if not
+  quantity      Int       @default(1)
+  
+  // Source tracking (online vs offline booking)
+  blockedBy     String?   // Booking ID if blocked by reservation
+  
+  @@unique([inventoryId, date])
+  @@index([inventoryId])
+  @@index([date])
+  @@map("availability_slots")
+}
+
+// ============================================
+// GPS TRACKING
+// ============================================
+
+model GpsDevice {
+  id            String    @id @default(cuid())
+  deviceImei    String    @unique
+  serialNumber  String    @unique
+  
+  // Current location (updated frequently)
+  latitude      Float?
+  longitude     Float?
+  altitude      Float?
+  speed         Float?
+  heading       Float?
+  lastUpdated   DateTime?
+  
+  // Status
+  isActive      Boolean   @default(true)
+  batteryLevel  Int?      // 0-100
+  signalStrength Int?
+  
+  // Security
+  isImmobilized Boolean   @default(false)
+  geofenceConfig Json?    // Geofence boundaries
+  
+  // Relations
+  inventory     Inventory?
+  locationHistory GpsLocationHistory[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("gps_devices")
+}
+
+model GpsLocationHistory {
+  id            String    @id @default(cuid())
+  deviceId      String
+  device        GpsDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  
+  latitude      Float
+  longitude     Float
+  altitude      Float?
+  speed         Float?
+  heading       Float?
+  recordedAt    DateTime
+  
+  // Geofence events
+  eventType     GpsEventType?
+  
+  @@index([deviceId])
+  @@index([recordedAt])
+  @@map("gps_location_history")
+}
+
+// ============================================
+// BOOKING SYSTEM
+// ============================================
+
+model Booking {
+  id                String          @id @default(cuid())
+  bookingReference  String          @unique // Human-readable (e.g., NTOS-2024-001234)
+  
+  // User
+  userId            String
+  user              User            @relation(fields: [userId], references: [id])
+  
+  // Inventory
+  inventoryId       String
+  inventory         Inventory       @relation(fields: [inventoryId], references: [id])
+  
+  // Merchant
+  merchantId        String
+  merchant          Merchant        @relation(fields: [merchantId], references: [id])
+  
+  // Dates
+  checkInDate       DateTime        @db.Date
+  checkOutDate      DateTime        @db.Date
+  checkInTime       String?         // For cars: pickup time
+  checkOutTime      String?         // For cars: return time
+  
+  // Status
+  status            BookingStatus   @default(PENDING)
+  
+  // Pricing
+  baseAmount        Float
+  serviceFee        Float           @default(0)
+  taxAmount         Float           @default(0)
+  discountAmount    Float           @default(0)
+  totalAmount       Float
+  currency          String          @default("MYR")
+  
+  // Commission Split
+  merchantEarning   Float           // What merchant receives
+  platformCommission Float          // Platform fee
+  stateContribution Float?          // Optional state marketing contribution
+  
+  // Payment
+  paymentStatus     PaymentStatus   @default(PENDING)
+  paymentMethod     String?
+  paymentIntentId   String?         // External payment gateway ID
+  paidAt            DateTime?
+  
+  // MyDigitalID
+  myDigitalIdSignature String?      // Digital signature for contract
+  
+  // e-Invoice
+  eInvoiceNumber    String?
+  eInvoiceStatus    EInvoiceStatus  @default(NOT_REQUIRED)
+  eInvoiceSubmittedAt DateTime?
+  eInvoiceResponse  Json?
+  
+  // Guest details (for KYC)
+  guestName         String?
+  guestPhone        String?
+  guestEmail        String?
+  guestCount        Int             @default(1)
+  specialRequests   String?
+  
+  // Metadata
+  metadata          Json?           // Type-specific booking details
+  
+  // Relations
+  review            Review?
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([userId])
+  @@index([merchantId])
+  @@index([inventoryId])
+  @@index([bookingReference])
+  @@index([status])
+  @@index([checkInDate])
+  @@map("bookings")
+}
+
+// ============================================
+// OFFLINE BOOKING SYNC (ERP)
+// ============================================
+
+model OfflineBooking {
+  id                String    @id @default(cuid())
+  
+  // Link to merchant
+  merchantId        String
+  merchant          Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  // Inventory booked
+  inventoryId       String
+  
+  // Booking details (simplified vs online bookings)
+  guestName         String
+  guestPhone        String?
+  checkInDate       DateTime  @db.Date
+  checkOutDate      DateTime  @db.Date
+  
+  // Amount collected
+  totalAmount       Float
+  currency          String    @default("MYR")
+  
+  // Sync status
+  isSynced          Boolean   @default(false)
+  syncedAt          DateTime?
+  syncError         String?
+  
+  // Created by (merchant user)
+  createdBy         String
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([isSynced])
+  @@map("offline_bookings")
+}
+
+// ============================================
+// ERP MODULES
+// ============================================
+
+// HR Module
+model Employee {
+  id              String    @id @default(cuid())
+  merchantId      String
+  merchant        Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  fullName        String
+  icNumber        String
+  position        String
+  department      String?
+  
+  // Contact
+  phone           String?
+  email           String?
+  address         String?
+  
+  // Employment
+  employmentType  EmploymentType @default(FULL_TIME)
+  startDate       DateTime
+  endDate         DateTime?
+  
+  // Salary
+  basicSalary     Float
+  epfRate         Float     @default(0.11) // Employee rate
+  socsoCategory   String    @default("Category 1")
+  
+  // Status
+  isActive        Boolean   @default(true)
+  
+  // Relations
+  payrollRecords  PayrollRecord[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@map("employees")
+}
+
+model PayrollRecord {
+  id              String    @id @default(cuid())
+  employeeId      String
+  employee        Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  
+  // Period
+  year            Int
+  month           Int
+  
+  // Earnings
+  basicSalary     Float
+  allowances      Float     @default(0)
+  overtime        Float     @default(0)
+  bonuses         Float     @default(0)
+  grossPay        Float
+  
+  // Deductions
+  epfEmployee     Float
+  epfEmployer     Float
+  socsoEmployee   Float
+  socsoEmployer   Float
+  eisEmployee     Float     // Employment Insurance
+  eisEmployer     Float
+  pcb             Float     // Monthly tax deduction
+  otherDeductions Float     @default(0)
+  totalDeductions Float
+  
+  // Nett
+  netPay          Float
+  
+  // Status
+  isProcessed     Boolean   @default(false)
+  processedAt     DateTime?
+  
+  @@unique([employeeId, year, month])
+  @@index([employeeId])
+  @@map("payroll_records")
+}
+
+// Accounting Module
+model AccountingEntry {
+  id              String          @id @default(cuid())
+  merchantId      String
+  merchant        Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  // Entry details
+  entryType       AccountingType
+  category        String          // Revenue, expense category
+  subcategory     String?
+  
+  // Amount
+  amount          Float
+  currency        String          @default("MYR")
+  
+  // Description
+  description     String
+  reference       String?         // Invoice/receipt number
+  
+  // Date
+  transactionDate DateTime        @db.Date
+  
+  // Related booking (if any)
+  bookingId       String?
+  
+  // e-Invoice (for revenue entries)
+  eInvoiceNumber  String?
+  eInvoiceStatus  EInvoiceStatus  @default(NOT_REQUIRED)
+  
+  // Attachments
+  attachments     String[]        // Receipt/invoice images
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([merchantId])
+  @@index([entryType])
+  @@index([transactionDate])
+  @@map("accounting_entries")
+}
+
+// Legal Module
+model LegalDocument {
+  id              String          @id @default(cuid())
+  merchantId      String
+  merchant        Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  documentType    DocumentType
+  title           String
+  
+  // Parties
+  partyA          String          // Usually merchant
+  partyB          String          // Customer/tenant
+  
+  // Content
+  content         String          @db.Text
+  
+  // Signatures (MyDigitalID)
+  partyASigned    Boolean         @default(false)
+  partyASignedAt  DateTime?
+  partyASignature String?
+  
+  partyBSigned    Boolean         @default(false)
+  partyBSignedAt  DateTime?
+  partyBSignature String?
+  
+  // E-stamping
+  stampDutyPaid   Boolean         @default(false)
+  stampDutyAmount Float?
+  stampCertificateNo String?
+  
+  // Status
+  status          DocumentStatus  @default(DRAFT)
+  
+  // Validity
+  effectiveDate   DateTime?
+  expiryDate      DateTime?
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([merchantId])
+  @@index([documentType])
+  @@map("legal_documents")
+}
+
+// ============================================
+// REVIEWS & FAVORITES
+// ============================================
+
+model Review {
+  id            String    @id @default(cuid())
+  
+  bookingId     String    @unique
+  booking       Booking   @relation(fields: [bookingId], references: [id])
+  
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  
+  inventoryId   String
+  inventory     Inventory @relation(fields: [inventoryId], references: [id])
+  
+  // Ratings
+  overallRating Int       // 1-5
+  cleanliness   Int?
+  service       Int?
+  location      Int?
+  value         Int?
+  
+  // Content
+  title         String?
+  comment       String    @db.Text
+  
+  // Media
+  images        String[]
+  
+  // Status
+  isPublished   Boolean   @default(true)
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([inventoryId])
+  @@index([userId])
+  @@map("reviews")
+}
+
+model Favorite {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  inventoryId   String
+  
+  createdAt     DateTime  @default(now())
+
+  @@unique([userId, inventoryId])
+  @@index([userId])
+  @@map("favorites")
+}
+
+// ============================================
+// FIELD OFFICER MODULE
+// ============================================
+
+model FieldOfficer {
+  id              String          @id @default(cuid())
+  
+  // Personal
+  fullName        String
+  email           String          @unique
+  phone           String
+  employeeId      String          @unique
+  
+  // Territory
+  assignedState   State
+  assignedDistricts String[]      // Can cover multiple districts
+  
+  // Auth
+  passwordHash    String
+  isActive        Boolean         @default(true)
+  
+  // Relations
+  visits          FieldVisit[]
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("field_officers")
+}
+
+model FieldVisit {
+  id              String          @id @default(cuid())
+  officerId       String
+  officer         FieldOfficer    @relation(fields: [officerId], references: [id])
+  
+  // Location
+  latitude        Float
+  longitude       Float
+  address         String?
+  
+  // Visit details
+  visitType       VisitType
+  merchantId      String?         // If visiting existing merchant
+  notes           String?         @db.Text
+  
+  // Photos
+  photos          String[]
+  
+  // Outcome
+  outcome         String?         // ONBOARDED, FOLLOW_UP, REJECTED
+  followUpDate    DateTime?
+  
+  visitDate       DateTime        @default(now())
+  
+  @@index([officerId])
+  @@index([visitDate])
+  @@map("field_visits")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum BusinessType {
+  SOLE_PROPRIETOR
+  PARTNERSHIP
+  SDN_BHD
+  ENTERPRISE
+  COOPERATIVE
+  ASSOCIATION
+}
+
+enum State {
+  JOHOR
+  KEDAH
+  KELANTAN
+  MELAKA
+  NEGERI_SEMBILAN
+  PAHANG
+  PERAK
+  PERLIS
+  PULAU_PINANG
+  SABAH
+  SARAWAK
+  SELANGOR
+  TERENGGANU
+  KUALA_LUMPUR
+  LABUAN
+  PUTRAJAYA
+}
+
+enum VerificationStatus {
+  PENDING
+  IN_REVIEW
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum InventoryCategory {
+  ACCOMMODATION
+  TRANSPORTATION
+  EXPERIENCE
+}
+
+enum InventoryType {
+  // Accommodation
+  HOTEL
+  RESORT
+  HOMESTAY
+  BOUTIQUE_HOTEL
+  HOSTEL
+  APARTMENT
+  
+  // Transportation
+  CAR_RENTAL
+  BUS
+  FERRY
+  PRIVATE_DRIVER
+  
+  // Experience
+  TOUR
+  ACTIVITY
+  EVENT
+  WORKSHOP
+}
+
+enum GpsEventType {
+  GEOFENCE_ENTER
+  GEOFENCE_EXIT
+  SPEEDING
+  SUDDEN_STOP
+  TOWING
+  POWER_CUT
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED_BY_GUEST
+  CANCELLED_BY_MERCHANT
+  NO_SHOW
+  COMPLETED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum EInvoiceStatus {
+  NOT_REQUIRED
+  PENDING
+  SUBMITTED
+  VALIDATED
+  REJECTED
+  CANCELLED
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERN
+}
+
+enum AccountingType {
+  REVENUE
+  EXPENSE
+}
+
+enum DocumentType {
+  RENTAL_AGREEMENT
+  SERVICE_CONTRACT
+  EMPLOYMENT_CONTRACT
+  TERMS_OF_SERVICE
+  PRIVACY_POLICY
+}
+
+enum DocumentStatus {
+  DRAFT
+  PENDING_SIGNATURE
+  SIGNED
+  EXPIRED
+  TERMINATED
+}
+
+enum VisitType {
+  MERCHANT_ONBOARDING
+  VERIFICATION_VISIT
+  GPS_INSTALLATION
+  TRAINING
+  FOLLOW_UP
+  QUALITY_CHECK
+}

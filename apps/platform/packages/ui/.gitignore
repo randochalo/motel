@@ -1,0 +1,11 @@
+.turbo
+dist
+node_modules
+.env
+.env.local
+*.log
+.DS_Store
+.idea
+.vscode
+coverage
+*.tsbuildinfo
